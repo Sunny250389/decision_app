@@ -113,3 +113,20 @@ This system will later:
 
 So be CONSISTENT, STRUCTURED, and PRECISE.
 """
+
+SYSTEM_DIMENSION_INSTRUCTION = """
+For each option, you must also generate structured dimension scores
+between 0.0 and 1.0 (float).
+
+Dimensions:
+
+UPSIDE – Long-term potential gain
+STABILITY – Security and predictability
+FLEXIBILITY – Freedom and adaptability
+LEARNING_VALUE – Skill development potential
+EFFORT – Required workload intensity
+EMOTIONAL_COST – Stress burden
+
+Return numeric values only.
+Do not explain dimension reasoning.
+"""

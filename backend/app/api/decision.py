@@ -8,6 +8,62 @@ from app.services.llm_service import stream_decision_analysis
 router = APIRouter(prefix="/decision", tags=["decision"])
 
 
+# -----------------------------------------------------
+# DIMENSION NORMALIZATION HELPERS
+# -----------------------------------------------------
+
+REQUIRED_DIMENSIONS = [
+    "UPSIDE",
+    "STABILITY",
+    "FLEXIBILITY",
+    "LEARNING_VALUE",
+    "EFFORT",
+    "EMOTIONAL_COST",
+]
+
+
+def normalize_dimensions(dimensions: dict) -> dict:
+    """
+    Ensures:
+    - All required keys exist
+    - Values are floats
+    - Values are clamped between 0.0 and 1.0
+    """
+
+    normalized = {}
+
+    for key in REQUIRED_DIMENSIONS:
+        value = dimensions.get(key, 0.5)
+
+        try:
+            value = float(value)
+        except Exception:
+            value = 0.5
+
+        normalized[key] = max(0.0, min(1.0, value))
+
+    return normalized
+
+
+def ensure_option_dimensions(event: dict) -> dict:
+    """
+    Guarantees that every option event contains structured dimensions.
+    """
+
+    dimensions = event.get("dimensions")
+
+    if not isinstance(dimensions, dict):
+        dimensions = {}
+
+    event["dimensions"] = normalize_dimensions(dimensions)
+
+    return event
+
+
+# -----------------------------------------------------
+# ROUTE
+# -----------------------------------------------------
+
 @router.post("/evaluate")
 async def evaluate_decision(request: DecisionRequest):
 
@@ -17,8 +73,24 @@ async def evaluate_decision(request: DecisionRequest):
                     decision_text=request.decision_text,
                     constraints=request.constraints,
             ):
-                # ---- AUDIT DETECTION ----
+
+                # --------------------------------------------------
+                # OPTION EVENT STRUCTURE ENFORCEMENT
+                # --------------------------------------------------
+
+                if event.get("event") == "option":
+
+                    option_data = ensure_option_dimensions(event.get("data", {}))
+
+                    yield format_sse("option", option_data)
+                    continue
+
+                # --------------------------------------------------
+                # AUDIT EVENT HANDLING
+                # --------------------------------------------------
+
                 if event.get("type") == "decision_audit":
+
                     yield format_sse("audit:key_factors", event["key_factors"])
                     yield format_sse("audit:assumptions", event["assumptions"])
                     yield format_sse("audit:reversal_triggers", event["reversal_triggers"])
@@ -27,7 +99,10 @@ async def evaluate_decision(request: DecisionRequest):
                     yield format_sse("done", True)
                     return
 
-                # ---- PASS THROUGH EXISTING EVENTS ----
+                # --------------------------------------------------
+                # PASS THROUGH OTHER EVENTS
+                # --------------------------------------------------
+
                 yield format_sse(
                     event.get("event", event.get("type", "message")),
                     event,
@@ -46,6 +121,10 @@ async def evaluate_decision(request: DecisionRequest):
         },
     )
 
+
+# -----------------------------------------------------
+# SSE FORMATTER
+# -----------------------------------------------------
 
 def format_sse(event_name: str, data) -> str:
     """

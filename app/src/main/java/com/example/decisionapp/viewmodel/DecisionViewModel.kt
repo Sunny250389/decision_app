@@ -1,178 +1,242 @@
 package com.example.decisionapp.viewmodel
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.decisionapp.engine.*
+import com.example.decisionapp.model.DecisionContext
 import com.example.decisionapp.model.DecisionUIState
 import com.example.decisionapp.model.Option
 import com.example.decisionapp.repository.DecisionRepository
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.max
 
-class DecisionViewModel : ViewModel() {
-
-    private val repository = DecisionRepository()
+class DecisionViewModel(
+    private val repository: DecisionRepository = DecisionRepository()
+) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DecisionUIState())
-    val uiState = _uiState.asStateFlow()
+    val uiState: StateFlow<DecisionUIState> = _uiState.asStateFlow()
+
+    // Holds streaming options for recompute
+    private val accumulatedOptions = mutableListOf<Option>()
+
+    // -------------------------------------------------
+    // MAIN ENTRY
+    // -------------------------------------------------
+
+    fun submitDecision(
+        decisionText: String,
+        constraints: List<String>
+    ) {
+
+        accumulatedOptions.clear()
+
+        _uiState.value = _uiState.value.copy(
+            isLoading = true,
+            error = null,
+            recommendation = null,
+            options = emptyList(),
+            confidenceScore = 0.0
+        )
+
+        viewModelScope.launch {
+
+            repository.evaluateDecision(
+                decisionText = decisionText,
+                constraints = constraints
+            ).collect { (event, payload) ->
+
+                when (event) {
+
+                    "option" -> {
+                        val option = payload as? Option ?: return@collect
+
+                        accumulatedOptions.add(option)
+                        recomputeWithCurrentContext()
+                    }
+
+                    "recommendation" -> {
+                        val recommendationText = payload as? String ?: ""
+
+                        _uiState.value = _uiState.value.copy(
+                            recommendation = recommendationText,
+                            isLoading = false
+                        )
+                    }
+
+                    "error" -> {
+                        val errorMessage = payload as? String ?: "Unknown error"
+
+                        _uiState.value = _uiState.value.copy(
+                            error = errorMessage,
+                            isLoading = false
+                        )
+                    }
+
+                    "done" -> {
+                        _uiState.value = _uiState.value.copy(
+                            isLoading = false
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------
+    // CORE RECOMPUTE ENGINE (Used by sliders)
+    // -------------------------------------------------
+
+    private fun recomputeWithCurrentContext() {
+
+        if (accumulatedOptions.isEmpty()) return
+
+        val ranked = applyDeterministicScoring(accumulatedOptions)
+        val confidence = computeConfidence(ranked)
+
+        _uiState.value = _uiState.value.copy(
+            options = ranked,
+            confidenceScore = confidence
+        )
+    }
+
+    // -------------------------------------------------
+    // SCORING
+    // -------------------------------------------------
+
+    private fun applyDeterministicScoring(
+        options: List<Option>
+    ): List<Option> {
+
+        if (options.isEmpty()) return options
+
+        val preferences = buildPreferencesFromContext()
+
+        return ScoringEngine.rankOptions(
+            options = options,
+            preferences = preferences,
+            riskSensitivity = deriveRiskSensitivity(),
+            emotionalSensitivity = deriveEmotionalSensitivity()
+        )
+    }
+
+    private fun buildPreferencesFromContext(): List<ContextPreference> {
+
+        val ctx = _uiState.value.context
+
+        return listOf(
+            ContextPreference(AttributeDimension.UPSIDE, ctx.growthPriority.toDouble()),
+            ContextPreference(AttributeDimension.STABILITY, ctx.stabilityPriority.toDouble()),
+            ContextPreference(AttributeDimension.FLEXIBILITY, ctx.flexibilityPriority.toDouble()),
+            ContextPreference(AttributeDimension.LEARNING_VALUE, ctx.learningPriority.toDouble()),
+            ContextPreference(AttributeDimension.EFFORT, (6 - ctx.emotionalStress).toDouble())
+        )
+    }
+
+    private fun deriveRiskSensitivity(): Double {
+        val riskTolerance = _uiState.value.context.riskTolerance
+        return (6 - riskTolerance) * 0.2
+    }
+
+    private fun deriveEmotionalSensitivity(): Double {
+        val stress = _uiState.value.context.emotionalStress
+        return stress * 0.2
+    }
+
+    // -------------------------------------------------
+    // CONFIDENCE
+    // -------------------------------------------------
+
+    private fun computeConfidence(
+        rankedOptions: List<Option>
+    ): Double {
+
+        if (rankedOptions.isEmpty()) return 0.0
+
+        val separation = calculateNormalizedSeparation(rankedOptions)
+
+        return ConfidenceCalculator.compute(
+            inputCompleteness = 0.7,
+            constraintClarity = 0.8,
+            scoreSeparation = separation
+        ).coerceIn(0.0, 1.0)
+    }
+
+    private fun calculateNormalizedSeparation(
+        rankedOptions: List<Option>
+    ): Double {
+
+        if (rankedOptions.size < 2) return 0.5
+
+        val top = rankedOptions[0].computedScore ?: 0.0
+        val second = rankedOptions[1].computedScore ?: 0.0
+
+        val diff = abs(top - second)
+        val maxScore = max(abs(top), abs(second)).takeIf { it > 0 } ?: 1.0
+
+        return (diff / maxScore).coerceIn(0.0, 1.0)
+    }
+
+    // -------------------------------------------------
+    // UI BINDINGS
+    // -------------------------------------------------
 
     fun updateDecision(text: String) {
-        _uiState.update { it.copy(decisionText = text) }
+        _uiState.value = _uiState.value.copy(
+            decisionText = text
+        )
     }
 
     fun evaluateDecision() {
 
-        if (_uiState.value.isLoading) {
-            Log.w("DecisionVM", "evaluateDecision ignored — already loading")
-            return
-        }
+        val currentText = _uiState.value.decisionText
+        if (currentText.isBlank()) return
 
-        Log.d("DecisionVM", "evaluateDecision() called")
+        submitDecision(
+            decisionText = currentText,
+            constraints = emptyList()
+        )
+    }
 
-        val decisionText = _uiState.value.decisionText
+    // -------------------------------------------------
+    // CONTEXT UPDATES (Auto-Recompute Enabled)
+    // -------------------------------------------------
 
-        _uiState.update {
-            it.copy(
-                isLoading = true,
-                statusMessage = null,
-                options = emptyList(),
-                recommendation = null,
-                finalRecommendation = null,
-                confidence = null,
-                keyFactors = emptyList(),
-                assumptions = emptyList(),
-                reversalTriggers = emptyList()
-            )
-        }
+    fun updateGrowthPriority(value: Int) {
+        updateContext(_uiState.value.context.copy(
+            growthPriority = value.coerceIn(1, 5)
+        ))
+    }
 
-        viewModelScope.launch {
-            try {
-                repository.evaluateDecision(
-                    decisionText = decisionText,
-                    constraints = emptyList()
-                ).collect { (event, payload) ->
+    fun updateStabilityPriority(value: Int) {
+        updateContext(_uiState.value.context.copy(
+            stabilityPriority = value.coerceIn(1, 5)
+        ))
+    }
 
-                    when (event) {
+    fun updateRiskTolerance(value: Int) {
+        updateContext(_uiState.value.context.copy(
+            riskTolerance = value.coerceIn(1, 5)
+        ))
+    }
 
-                        /* ---------- STATUS ---------- */
-                        "status" -> {
-                            val message = payload as? String
-                            Log.d("DecisionVM", "status: $message")
-                            if (message != null) {
-                                _uiState.update { it.copy(statusMessage = message) }
-                            }
-                        }
+    fun updateEmotionalStress(value: Int) {
+        updateContext(_uiState.value.context.copy(
+            emotionalStress = value.coerceIn(1, 5)
+        ))
+    }
 
-                        /* ---------- OPTIONS ---------- */
-                        "option" -> {
-                            if (payload is Option) {
-                                _uiState.update {
-                                    it.copy(options = it.options + payload)
-                                }
-                            }
-                        }
+    private fun updateContext(newContext: DecisionContext) {
 
-                        "recommendation" -> {
-                            if (payload is Option) {
-                                _uiState.update {
-                                    it.copy(recommendation = payload)
-                                }
-                            }
-                        }
+        _uiState.value = _uiState.value.copy(
+            context = newContext
+        )
 
-                        /* ---------- AUDIT EVENTS ---------- */
-                        "audit:confidence" -> {
-                            val value = (payload as? Number)?.toFloat()
-                            if (value != null) {
-                                _uiState.update { it.copy(confidence = value) }
-                            }
-                        }
-
-                        "audit:key_factors" -> {
-                            val list = payload as? List<*> ?: emptyList<Any>()
-                            _uiState.update {
-                                it.copy(keyFactors = list.filterIsInstance<String>())
-                            }
-                        }
-
-                        "audit:assumptions" -> {
-                            val list = payload as? List<*> ?: emptyList<Any>()
-                            _uiState.update {
-                                it.copy(assumptions = list.filterIsInstance<String>())
-                            }
-                        }
-
-                        "audit:reversal_triggers" -> {
-                            val list = payload as? List<*> ?: emptyList<Any>()
-                            _uiState.update {
-                                it.copy(reversalTriggers = list.filterIsInstance<String>())
-                            }
-                        }
-
-                        /* ---------- 🔥 FINAL DECISION ---------- */
-                        "decision_audit" -> {
-                            val audit = payload as Map<*, *>
-
-                            Log.d("DecisionVM", "decision_audit received")
-
-                            _uiState.update {
-                                it.copy(
-                                    finalRecommendation =
-                                        audit["final_recommendation"] as? String,
-                                    confidence =
-                                        (audit["confidence"] as? Number)?.toFloat(),
-                                    keyFactors =
-                                        (audit["key_factors"] as? List<*>)?.filterIsInstance<String>()
-                                            ?: emptyList(),
-                                    assumptions =
-                                        (audit["assumptions"] as? List<*>)?.filterIsInstance<String>()
-                                            ?: emptyList(),
-                                    reversalTriggers =
-                                        (audit["reversal_triggers"] as? List<*>)?.filterIsInstance<String>()
-                                            ?: emptyList(),
-                                    isLoading = false,
-                                    statusMessage = null
-                                )
-                            }
-                        }
-
-                        /* ---------- DONE ---------- */
-                        "done" -> {
-                            Log.d("DecisionVM", "stream done")
-                            _uiState.update { it.copy(isLoading = false) }
-                        }
-
-                        /* ---------- ERROR ---------- */
-                        "error" -> {
-                            Log.e("DecisionVM", "backend error: $payload")
-                            _uiState.update {
-                                it.copy(
-                                    isLoading = false,
-                                    finalRecommendation =
-                                        "Something went wrong while analyzing the decision."
-                                )
-                            }
-                        }
-
-                        else -> {
-                            Log.d("DecisionVM", "Ignored event: $event")
-                        }
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e("DecisionVM", "Decision stream failed", e)
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        finalRecommendation = "Decision analysis failed. Please retry."
-                    )
-                }
-            }
-        }
+        // Immediately recompute ranking
+        recomputeWithCurrentContext()
     }
 }

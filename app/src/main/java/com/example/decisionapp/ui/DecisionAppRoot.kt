@@ -27,7 +27,10 @@ fun DecisionAppRoot() {
             state = uiState,
             onDecisionChange = { viewModel.updateDecision(it) },
             onEvaluateDecision = { viewModel.evaluateDecision() },
-            contentPadding = paddingValues   // 🔑 PASS IT DOWN
+            onGrowthChange = { viewModel.updateGrowthPriority(it) },
+            onStabilityChange = { viewModel.updateStabilityPriority(it) },
+            onRiskChange = { viewModel.updateRiskTolerance(it) },
+            contentPadding = paddingValues
         )
     }
 }

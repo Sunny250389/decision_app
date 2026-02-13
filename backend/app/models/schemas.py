@@ -30,3 +30,21 @@ class DecisionAudit(BaseModel):
     key_factors: List[str]
     assumptions: List[str]
     reversal_triggers: List[str]
+
+class OptionDimensions(BaseModel):
+    UPSIDE: float
+    STABILITY: float
+    FLEXIBILITY: float
+    LEARNING_VALUE: float
+    EFFORT: float
+    EMOTIONAL_COST: float
+
+
+class DecisionOption(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = ""
+    pros: List[str] = []
+    cons: List[str] = []
+    risk: str
+    dimensions: OptionDimensions
